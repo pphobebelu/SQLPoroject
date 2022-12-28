@@ -118,3 +118,198 @@ SELECT CUSTOMERID,
        T,
        FREQUENCY_HOLDOUT
 FROM RFM_COMBINED_CLEAN
+
+
+
+
+
+WITH TRAIN_TRANSACTIONS AS (
+  SELECT 
+    * 
+  FROM 
+    {{ source_table }} 
+  WHERE 
+    {{ transaction_date_col }} <= '{{ train_period_end }}'
+), 
+TRAIN_AGGS AS (
+  WITH BASIC_AGGS AS (
+    SELECT 
+      {{ customer_id_col }}, 
+      MAX({{ transaction_date_col }}) AS {{ transaction_date_col }}_MAX, 
+      MIN({{ transaction_date_col }}) AS {{ transaction_date_col }}_MIN, 
+      COUNT(DISTINCT {{ transaction_id_col }}) AS {{ transaction_id_col }}_COUNTDISTINCT, 
+      SUM({{ transaction_amount_col }}) AS {{ transaction_amount_col }}_SUM
+    FROM 
+      TRAIN_TRANSACTIONS 
+    GROUP BY 
+      {{ customer_id_col }}
+  ) 
+  SELECT 
+    BASIC_AGGS.{{ customer_id_col }}, 
+    BASIC_AGGS.{{ transaction_date_col }}_MAX, 
+    BASIC_AGGS.{{ transaction_date_col }}_MIN, 
+    BASIC_AGGS.{{ transaction_id_col }}_COUNTDISTINCT, 
+    BASIC_AGGS.{{ transaction_amount_col }}_SUM 
+  FROM 
+    BASIC_AGGS
+), 
+TRAIN_AGGS_WITH_DATE AS (
+  SELECT 
+    *, 
+    '{{ train_period_end }}' AS TRAIN_PERIOD_END 
+  FROM 
+    TRAIN_AGGS
+), 
+TRAIN_TENURE AS (
+  SELECT 
+    *, 
+    DATEDIFF(
+      {{ time_unit }}, {{ transaction_date_col }}_MIN, TRAIN_PERIOD_END
+    ) AS DIFF_{{ transaction_date_col }}_MIN_TRAIN_PERIOD_END 
+  FROM 
+    TRAIN_AGGS_WITH_DATE
+), 
+TRAIN_RECENCY AS (
+  SELECT 
+    *, 
+    DATEDIFF(
+      {{ time_unit }}, {{ transaction_date_col }}_MAX, TRAIN_PERIOD_END
+    ) AS DIFF_{{ transaction_date_col }}_MAX_TRAIN_PERIOD_END 
+  FROM 
+    TRAIN_TENURE
+), 
+TRAIN_RFM AS (
+  SELECT 
+    DIFF_{{ transaction_date_col }}_MAX_TRAIN_PERIOD_END AS RECENCY, 
+    DIFF_{{ transaction_date_col }}_MIN_TRAIN_PERIOD_END AS T, 
+    {{ transaction_id_col }}_COUNTDISTINCT AS FREQUENCY, 
+    {{ transaction_amount_col }}_SUM AS MONETARY, 
+    TRAIN_PERIOD_END, 
+    {{ transaction_date_col }}_MAX, 
+    {{ customer_id_col }}, 
+    {{ transaction_date_col }}_MIN 
+  FROM 
+    TRAIN_RECENCY
+), 
+HOLDOUT_TRANSACTIONS AS (
+  SELECT 
+    * 
+  FROM 
+    {{ source_table }} 
+  WHERE 
+    {{ transaction_date_col }} >= '{{ train_period_end }}' 
+    AND {{ transaction_date_col }} <= '{{ obs_end }}'
+), 
+HOLDOUT_AGGS AS (
+  WITH BASIC_AGGS AS (
+    SELECT 
+      {{ customer_id_col }}, 
+      MAX({{ transaction_date_col }}) AS {{ transaction_date_col }}_MAX, 
+      MIN({{ transaction_date_col }}) AS {{ transaction_date_col }}_MIN, 
+      COUNT(DISTINCT {{ transaction_id_col }}) AS {{ transaction_id_col }}_COUNTDISTINCT, 
+      SUM({{ transaction_amount_col }}) AS {{ transaction_amount_col }}_SUM
+    FROM 
+      HOLDOUT_TRANSACTIONS 
+    GROUP BY 
+      {{ customer_id_col }}
+  ) 
+  SELECT 
+    BASIC_AGGS.{{ customer_id_col }}, 
+    BASIC_AGGS.{{ transaction_date_col }}_MAX, 
+    BASIC_AGGS.{{ transaction_date_col }}_MIN, 
+    BASIC_AGGS.{{ transaction_id_col }}_COUNTDISTINCT, 
+    BASIC_AGGS.{{ transaction_amount_col }}_SUM 
+  FROM 
+    BASIC_AGGS
+), 
+HOLDOUT_AGGS_WITH_DATE AS (
+  SELECT 
+    *, 
+    '{{ obs_end }}' AS OBS_PERIOD_END 
+  FROM 
+    HOLDOUT_AGGS
+), 
+HOLDOUT_TENURE AS (
+  SELECT 
+    *, 
+    DATEDIFF(
+      {{ time_unit }}, {{ transaction_date_col }}_MAX, OBS_PERIOD_END
+    ) AS DIFF_{{ transaction_date_col }}_MAX_OBS_PERIOD_END 
+  FROM 
+    HOLDOUT_AGGS_WITH_DATE
+), 
+HOLDOUT_RECENCY AS (
+  SELECT 
+    *, 
+    DATEDIFF(
+      {{ time_unit }}, {{ transaction_date_col }}_MIN, OBS_PERIOD_END
+    ) AS DIFF_{{ transaction_date_col }}_MIN_OBS_PERIOD_END 
+  FROM 
+    HOLDOUT_TENURE
+), 
+HOLDOUT_RFM AS (
+  SELECT 
+    DIFF_{{ transaction_date_col }}_MAX_OBS_PERIOD_END AS RECENCY_HOLDOUT, 
+    DIFF_{{ transaction_date_col }}_MIN_OBS_PERIOD_END AS T_HOLDOUT, 
+    {{ transaction_id_col }}_COUNTDISTINCT AS FREQUENCY_HOLDOUT, 
+    {{ transaction_amount_col }}_SUM AS MONETARY_HOLDOUT, 
+    OBS_PERIOD_END, 
+    {{ transaction_date_col }}_MAX, 
+    {{ customer_id_col }}, 
+    {{ transaction_date_col }}_MIN 
+  FROM 
+    HOLDOUT_RECENCY
+), 
+HOLDOUT_RFM_F AS (
+  SELECT 
+    {{ customer_id_col }}, 
+    OBS_PERIOD_END, 
+    FREQUENCY_HOLDOUT 
+  FROM 
+    HOLDOUT_RFM
+), 
+RFM_COMBINED AS (
+  SELECT 
+    t1.TRAIN_PERIOD_END, 
+    t1.FREQUENCY, 
+    t1.{{ transaction_date_col }}_MAX, 
+    t1.{{ customer_id_col }}, 
+    t1.{{ transaction_date_col }}_MIN, 
+    t1.MONETARY, 
+    t1.T, 
+    t1.RECENCY, 
+    t2.OBS_PERIOD_END, 
+    t2.FREQUENCY_HOLDOUT 
+  FROM 
+    TRAIN_RFM AS t1 
+    LEFT JOIN HOLDOUT_RFM_F AS t2 ON t1.{{ customer_id_col }} = t2.{{ customer_id_col }}
+), 
+RFM_COMBINED_CLEAN AS (
+  SELECT 
+    TRAIN_PERIOD_END, 
+    RECENCY, 
+    {{ transaction_date_col }}_MIN, 
+    COALESCE(FREQUENCY_HOLDOUT, 0) AS FREQUENCY_HOLDOUT, 
+    MONETARY, 
+    FREQUENCY, 
+    T, 
+    {{ customer_id_col }}, 
+    {{ transaction_date_col }}_MAX, 
+    COALESCE(
+      OBS_PERIOD_END, 
+      MODE(OBS_PERIOD_END) OVER ()
+    ) AS OBS_PERIOD_END 
+  FROM 
+    RFM_COMBINED
+) 
+SELECT 
+  {{ customer_id_col }}, 
+  TRAIN_PERIOD_END, 
+  OBS_PERIOD_END, 
+  RECENCY, 
+  FREQUENCY, 
+  MONETARY, 
+  T, 
+  FREQUENCY_HOLDOUT 
+FROM 
+  RFM_COMBINED_CLEAN
